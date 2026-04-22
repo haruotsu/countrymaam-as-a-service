@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useState, use } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { use, useEffect, useState } from "react";
 import {
   api,
+  ApiError,
   type Account,
   type Flavor,
   type Transaction,
-  type User,
 } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 const typeLabels: Record<Transaction["type"], string> = {
   deposit: "預入",
@@ -28,46 +30,41 @@ export default function AccountPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const { user, loading } = useAuth();
+  const router = useRouter();
   const [account, setAccount] = useState<Account | null>(null);
-  const [user, setUser] = useState<User | null>(null);
   const [txs, setTxs] = useState<Transaction[]>([]);
   const [flavors, setFlavors] = useState<Flavor[]>([]);
-  const [sameFlavorAccounts, setSameFlavorAccounts] = useState<Account[]>([]);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!loading && !user) router.replace("/login");
+  }, [loading, user, router]);
 
   async function refresh() {
     try {
-      const a = await api.getAccount(id);
-      setAccount(a);
-      const [u, tx, fls] = await Promise.all([
-        api.getUser(a.user_id),
+      const [a, tx, fls] = await Promise.all([
+        api.getAccount(id),
         api.listTransactions(id),
         api.listFlavors(),
       ]);
-      setUser(u);
+      setAccount(a);
       setTxs(tx ?? []);
       setFlavors(fls ?? []);
-
-      // 送金先候補: 他ユーザーの同フレーバー口座一覧。
-      // 今はユーザー一覧 × 口座一覧 で愚直に拾う。
-      const users = await api.listUsers();
-      const candidates: Account[] = [];
-      for (const other of users) {
-        if (other.id === a.user_id) continue;
-        const accs = await api.listUserAccounts(other.id);
-        accs.forEach((x) => {
-          if (x.flavor === a.flavor) candidates.push(x);
-        });
-      }
-      setSameFlavorAccounts(candidates);
     } catch (e) {
-      setErr((e as Error).message);
+      if (e instanceof ApiError && e.status === 403) {
+        setErr("この口座はあなたのものではありません。");
+      } else {
+        setErr((e as Error).message);
+      }
     }
   }
 
   useEffect(() => {
-    refresh();
-  }, [id]);
+    if (user) refresh();
+  }, [user, id]);
+
+  if (loading || !user) return <p className="muted">読み込み中…</p>;
 
   if (!account) {
     return (
@@ -86,7 +83,7 @@ export default function AccountPage({
   return (
     <>
       <p>
-        <Link href={`/users/${account.user_id}`}>← {user?.name ?? ""} さんの金庫へ</Link>
+        <Link href="/">← 金庫に戻る</Link>
       </p>
 
       <section className="panel">
@@ -106,12 +103,7 @@ export default function AccountPage({
       {err && <div className="error">{err}</div>}
 
       <CashPanel account={account} onDone={refresh} />
-
-      <TransferPanel
-        account={account}
-        candidates={sameFlavorAccounts}
-        onDone={refresh}
-      />
+      <TransferPanel account={account} onDone={refresh} />
 
       <section className="panel">
         <h3 style={{ marginTop: 0 }}>📜 取引履歴</h3>
@@ -219,28 +211,29 @@ function CashPanel({
 
 function TransferPanel({
   account,
-  candidates,
   onDone,
 }: {
   account: Account;
-  candidates: Account[];
   onDone: () => void;
 }) {
-  const [toID, setToID] = useState(candidates[0]?.id ?? "");
+  const [email, setEmail] = useState("");
   const [amount, setAmount] = useState("1");
   const [memo, setMemo] = useState("");
   const [err, setErr] = useState<string | null>(null);
-
-  // candidates 変更時に初期値を合わせる
-  useEffect(() => {
-    if (!toID && candidates[0]) setToID(candidates[0].id);
-  }, [candidates, toID]);
+  const [ok, setOk] = useState<string | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
+    setOk(null);
     try {
-      await api.transfer(account.id, toID, Number(amount), memo);
+      // まず宛先口座を解決（同じフレーバー）
+      const res = await api.searchAccount(email, account.flavor);
+      await api.transfer(account.id, res.account.id, Number(amount), memo);
+      setOk(
+        `${res.user_name} さんに ${amount} マアムを送金しました（${res.user_email}）`,
+      );
+      setEmail("");
       setAmount("1");
       setMemo("");
       onDone();
@@ -251,40 +244,38 @@ function TransferPanel({
 
   return (
     <section className="panel">
-      <h3 style={{ marginTop: 0 }}>✉️ 送金（同じフレーバー間）</h3>
-      {candidates.length === 0 ? (
-        <p className="muted">
-          送金先の候補がいません（同じ {account.flavor} 口座を持つ別ユーザーが必要）。
-        </p>
-      ) : (
-        <form className="row" onSubmit={submit}>
-          <label>
-            送り先
-            <select value={toID} onChange={(e) => setToID(e.target.value)}>
-              {candidates.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.id.slice(0, 8)}… ({c.balance} マアム保有)
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            金額（マアム）
-            <input
-              type="number"
-              min={1}
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-            />
-          </label>
-          <label>
-            メモ
-            <input value={memo} onChange={(e) => setMemo(e.target.value)} />
-          </label>
-          <button type="submit">送金</button>
-        </form>
-      )}
+      <h3 style={{ marginTop: 0 }}>✉️ 送金</h3>
+      <p className="muted">
+        宛先のメールアドレスを入れると、同じフレーバー（{account.flavor}）の口座を自動で探して送金します。
+      </p>
+      <form className="row" onSubmit={submit}>
+        <label>
+          宛先メール
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+            placeholder="friend@example.com"
+          />
+        </label>
+        <label>
+          金額（マアム）
+          <input
+            type="number"
+            min={1}
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+          />
+        </label>
+        <label>
+          メモ
+          <input value={memo} onChange={(e) => setMemo(e.target.value)} />
+        </label>
+        <button type="submit">送金</button>
+      </form>
       {err && <div className="error">{err}</div>}
+      {ok && <div className="ok-msg">✅ {ok}</div>}
     </section>
   );
 }

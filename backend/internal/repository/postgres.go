@@ -39,9 +39,10 @@ func NewStoreFromURL(ctx context.Context, url string) (Store, func(), error) {
 	return s, pool.Close, nil
 }
 
-func (s *pgStore) Users() UserRepo                { return &userRepo{q: s.q} }
-func (s *pgStore) Accounts() AccountRepo          { return &accountRepo{q: s.q} }
-func (s *pgStore) Transactions() TransactionRepo  { return &txRepo{q: s.q} }
+func (s *pgStore) Users() UserRepo               { return &userRepo{q: s.q} }
+func (s *pgStore) Accounts() AccountRepo         { return &accountRepo{q: s.q} }
+func (s *pgStore) Transactions() TransactionRepo { return &txRepo{q: s.q} }
+func (s *pgStore) Sessions() SessionRepo         { return &sessionRepo{q: s.q} }
 
 func (s *pgStore) WithTx(ctx context.Context, fn func(ctx context.Context, tx Store) error) error {
 	if s.pool == nil {
@@ -65,8 +66,9 @@ type userRepo struct{ q dbtx }
 
 func (r *userRepo) Create(ctx context.Context, u *domain.User) error {
 	row := r.q.QueryRow(ctx,
-		`INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id, created_at`,
-		u.Name, u.Email)
+		`INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3)
+		 RETURNING id, created_at`,
+		u.Name, u.Email, u.PasswordHash)
 	if err := row.Scan(&u.ID, &u.CreatedAt); err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrDuplicateUserEmail
@@ -79,8 +81,8 @@ func (r *userRepo) Create(ctx context.Context, u *domain.User) error {
 func (r *userRepo) FindByID(ctx context.Context, id string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.q.QueryRow(ctx,
-		`SELECT id, name, email, created_at FROM users WHERE id = $1`, id).
-		Scan(&u.ID, &u.Name, &u.Email, &u.CreatedAt)
+		`SELECT id, name, email, password_hash, created_at FROM users WHERE id = $1`, id).
+		Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrUserNotFound
 	}
@@ -93,8 +95,8 @@ func (r *userRepo) FindByID(ctx context.Context, id string) (*domain.User, error
 func (r *userRepo) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.q.QueryRow(ctx,
-		`SELECT id, name, email, created_at FROM users WHERE email = $1`, email).
-		Scan(&u.ID, &u.Name, &u.Email, &u.CreatedAt)
+		`SELECT id, name, email, password_hash, created_at FROM users WHERE email = $1`, email).
+		Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrUserNotFound
 	}
@@ -106,7 +108,7 @@ func (r *userRepo) FindByEmail(ctx context.Context, email string) (*domain.User,
 
 func (r *userRepo) List(ctx context.Context) ([]*domain.User, error) {
 	rows, err := r.q.Query(ctx,
-		`SELECT id, name, email, created_at FROM users ORDER BY created_at ASC`)
+		`SELECT id, name, email, password_hash, created_at FROM users ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +116,7 @@ func (r *userRepo) List(ctx context.Context) ([]*domain.User, error) {
 	var out []*domain.User
 	for rows.Next() {
 		u := &domain.User{}
-		if err := rows.Scan(&u.ID, &u.Name, &u.Email, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -252,6 +254,38 @@ func (r *txRepo) ListByAccount(ctx context.Context, accountID string, limit int)
 	return out, rows.Err()
 }
 
+// ---------- sessions ----------
+
+type sessionRepo struct{ q dbtx }
+
+func (r *sessionRepo) Create(ctx context.Context, s *domain.Session) error {
+	row := r.q.QueryRow(ctx,
+		`INSERT INTO sessions (user_id, token, expires_at) VALUES ($1, $2, $3)
+		 RETURNING id, created_at`,
+		s.UserID, s.Token, s.ExpiresAt)
+	return row.Scan(&s.ID, &s.CreatedAt)
+}
+
+func (r *sessionRepo) FindActive(ctx context.Context, token string) (*domain.Session, error) {
+	s := &domain.Session{}
+	err := r.q.QueryRow(ctx,
+		`SELECT id, user_id, token, expires_at, created_at
+		 FROM sessions WHERE token = $1 AND expires_at > NOW()`, token).
+		Scan(&s.ID, &s.UserID, &s.Token, &s.ExpiresAt, &s.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (r *sessionRepo) DeleteByToken(ctx context.Context, token string) error {
+	_, err := r.q.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token)
+	return err
+}
+
 // ---------- helpers ----------
 
 func isUniqueViolation(err error) bool {
@@ -270,7 +304,7 @@ func isCheckViolation(err error) bool {
 // CleanAll はテスト用に全テーブルを TRUNCATE する。本番では呼ばない前提。
 func (s *pgStore) CleanAll(ctx context.Context) error {
 	_, err := s.q.Exec(ctx, strings.Join([]string{
-		`TRUNCATE transactions, accounts, users RESTART IDENTITY CASCADE`,
+		`TRUNCATE sessions, transactions, accounts, users RESTART IDENTITY CASCADE`,
 	}, ";"))
 	return err
 }

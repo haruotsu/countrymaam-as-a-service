@@ -9,73 +9,70 @@ import (
 )
 
 // Service はユースケース層。HTTP ハンドラと DB の間を繋ぐ。
+// ほとんどのメソッドは viewer（呼び出しているユーザー）の ID を受け取り、
+// 他ユーザーの資産を勝手に操作できないように所有権をチェックする。
 type Service struct {
 	store repository.Store
 }
 
 func New(store repository.Store) *Service { return &Service{store: store} }
 
-// ---------- Users ----------
-
-type CreateUserInput struct {
-	Name  string
-	Email string
-}
-
-func (s *Service) CreateUser(ctx context.Context, in CreateUserInput) (*domain.User, error) {
-	u, err := domain.NewUser(in.Name, in.Email)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.store.Users().Create(ctx, u); err != nil {
-		return nil, err
-	}
-	return u, nil
-}
-
-func (s *Service) ListUsers(ctx context.Context) ([]*domain.User, error) {
-	return s.store.Users().List(ctx)
-}
+// ---------- Users（参照のみ） ----------
 
 func (s *Service) GetUser(ctx context.Context, id string) (*domain.User, error) {
 	return s.store.Users().FindByID(ctx, id)
 }
 
-// ---------- Accounts ----------
-
-type OpenAccountInput struct {
-	UserID string
-	Flavor domain.Flavor
+// FindAccountByEmailAndFlavor は送金先解決のための公開検索。
+// email と flavor から相手の口座 ID を得る。見つからなければ ErrAccountNotFound。
+func (s *Service) FindAccountByEmailAndFlavor(ctx context.Context, email string, flavor domain.Flavor) (*domain.Account, *domain.User, error) {
+	u, err := s.store.Users().FindByEmail(ctx, normalizeEmail(email))
+	if err != nil {
+		return nil, nil, domain.ErrAccountNotFound
+	}
+	a, err := s.store.Accounts().FindByUserIDAndFlavor(ctx, u.ID, flavor)
+	if err != nil {
+		return nil, nil, err
+	}
+	return a, u, nil
 }
 
-func (s *Service) OpenAccount(ctx context.Context, in OpenAccountInput) (*domain.Account, error) {
-	if _, err := s.store.Users().FindByID(ctx, in.UserID); err != nil {
-		return nil, err
-	}
-	a := domain.NewAccount(in.UserID, in.Flavor)
+// ---------- Accounts ----------
+
+// OpenAccount は viewer 本人の口座を開設する。
+func (s *Service) OpenAccount(ctx context.Context, viewerID string, flavor domain.Flavor) (*domain.Account, error) {
+	a := domain.NewAccount(viewerID, flavor)
 	if err := s.store.Accounts().Create(ctx, a); err != nil {
 		return nil, err
 	}
 	return a, nil
 }
 
-func (s *Service) GetAccount(ctx context.Context, id string) (*domain.Account, error) {
-	return s.store.Accounts().FindByID(ctx, id)
+func (s *Service) ListMyAccounts(ctx context.Context, viewerID string) ([]*domain.Account, error) {
+	return s.store.Accounts().ListByUser(ctx, viewerID)
 }
 
-func (s *Service) ListAccountsByUser(ctx context.Context, userID string) ([]*domain.Account, error) {
-	return s.store.Accounts().ListByUser(ctx, userID)
+// GetMyAccount は viewer 本人の口座のみ返す。他人のものを指定すると ErrForbidden。
+func (s *Service) GetMyAccount(ctx context.Context, viewerID, accountID string) (*domain.Account, error) {
+	a, err := s.store.Accounts().FindByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if a.UserID != viewerID {
+		return nil, domain.ErrForbidden
+	}
+	return a, nil
 }
 
 // ---------- Deposit / Withdraw ----------
 
-func (s *Service) Deposit(ctx context.Context, accountID string, amount int64, memo string) (*domain.Account, error) {
+func (s *Service) Deposit(ctx context.Context, viewerID, accountID string, amount int64, memo string) (*domain.Account, error) {
 	if amount <= 0 {
 		return nil, domain.ErrInvalidAmount
 	}
 	var updated *domain.Account
 	err := s.store.WithTx(ctx, func(ctx context.Context, tx repository.Store) error {
-		if _, err := tx.Accounts().FindByID(ctx, accountID); err != nil {
+		if err := ensureOwner(ctx, tx, viewerID, accountID); err != nil {
 			return err
 		}
 		if err := tx.Accounts().UpdateBalance(ctx, accountID, amount); err != nil {
@@ -99,13 +96,13 @@ func (s *Service) Deposit(ctx context.Context, accountID string, amount int64, m
 	return updated, err
 }
 
-func (s *Service) Withdraw(ctx context.Context, accountID string, amount int64, memo string) (*domain.Account, error) {
+func (s *Service) Withdraw(ctx context.Context, viewerID, accountID string, amount int64, memo string) (*domain.Account, error) {
 	if amount <= 0 {
 		return nil, domain.ErrInvalidAmount
 	}
 	var updated *domain.Account
 	err := s.store.WithTx(ctx, func(ctx context.Context, tx repository.Store) error {
-		if _, err := tx.Accounts().FindByID(ctx, accountID); err != nil {
+		if err := ensureOwner(ctx, tx, viewerID, accountID); err != nil {
 			return err
 		}
 		if err := tx.Accounts().UpdateBalance(ctx, accountID, -amount); err != nil {
@@ -132,6 +129,7 @@ func (s *Service) Withdraw(ctx context.Context, accountID string, amount int64, 
 // ---------- Transfer ----------
 
 type TransferInput struct {
+	ViewerID      string
 	FromAccountID string
 	ToAccountID   string
 	Amount        int64
@@ -149,6 +147,9 @@ func (s *Service) Transfer(ctx context.Context, in TransferInput) error {
 		from, err := tx.Accounts().FindByID(ctx, in.FromAccountID)
 		if err != nil {
 			return fmt.Errorf("from: %w", err)
+		}
+		if from.UserID != in.ViewerID {
+			return domain.ErrForbidden
 		}
 		to, err := tx.Accounts().FindByID(ctx, in.ToAccountID)
 		if err != nil {
@@ -172,25 +173,23 @@ func (s *Service) Transfer(ctx context.Context, in TransferInput) error {
 		}); err != nil {
 			return err
 		}
-		if err := tx.Transactions().Create(ctx, &domain.Transaction{
+		return tx.Transactions().Create(ctx, &domain.Transaction{
 			AccountID:             to.ID,
 			CounterpartyAccountID: &from.ID,
 			Type:                  domain.TxTransferIn,
 			Amount:                in.Amount,
 			Memo:                  in.Memo,
-		}); err != nil {
-			return err
-		}
-		return nil
+		})
 	})
 }
 
 // ---------- Exchange ----------
 
 type ExchangeInput struct {
+	ViewerID      string
 	FromAccountID string
 	ToAccountID   string
-	Amount        int64 // from 側で引く量
+	Amount        int64
 	Memo          string
 }
 
@@ -212,9 +211,15 @@ func (s *Service) Exchange(ctx context.Context, in ExchangeInput) (*ExchangeResu
 		if err != nil {
 			return err
 		}
+		if from.UserID != in.ViewerID {
+			return domain.ErrForbidden
+		}
 		to, err := tx.Accounts().FindByID(ctx, in.ToAccountID)
 		if err != nil {
 			return err
+		}
+		if to.UserID != in.ViewerID {
+			return domain.ErrForbidden
 		}
 		if from.UserID != to.UserID {
 			return domain.ErrForeignExchange
@@ -255,6 +260,22 @@ func (s *Service) Exchange(ctx context.Context, in ExchangeInput) (*ExchangeResu
 
 // ---------- Transactions ----------
 
-func (s *Service) ListTransactions(ctx context.Context, accountID string, limit int) ([]*domain.Transaction, error) {
+func (s *Service) ListMyTransactions(ctx context.Context, viewerID, accountID string, limit int) ([]*domain.Transaction, error) {
+	if _, err := s.GetMyAccount(ctx, viewerID, accountID); err != nil {
+		return nil, err
+	}
 	return s.store.Transactions().ListByAccount(ctx, accountID, limit)
+}
+
+// ---------- helpers ----------
+
+func ensureOwner(ctx context.Context, store repository.Store, viewerID, accountID string) error {
+	a, err := store.Accounts().FindByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if a.UserID != viewerID {
+		return domain.ErrForbidden
+	}
+	return nil
 }

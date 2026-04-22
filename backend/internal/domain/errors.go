@@ -13,4 +13,10 @@ var (
 	ErrUserNotFound         = errors.New("user not found")
 	ErrDuplicateUserEmail   = errors.New("duplicate user email")
 	ErrDuplicateAccount     = errors.New("account already exists for this user and flavor")
+
+	ErrWeakPassword         = errors.New("password is too weak")
+	ErrInvalidCredentials   = errors.New("invalid credentials")
+	ErrUnauthenticated      = errors.New("unauthenticated")
+	ErrForbidden            = errors.New("forbidden")
+	ErrSessionNotFound      = errors.New("session not found")
 )

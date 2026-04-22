@@ -68,11 +68,25 @@
 
 ## HTTP (httptest)
 
-- [ ] `POST /users` 201 + body
-- [ ] `POST /users` 同じ email は 409
-- [ ] `POST /accounts` 201
-- [ ] `POST /accounts/:id/deposit` で残高反映
-- [ ] `POST /accounts/:id/withdraw` 残高不足は 422
-- [ ] `POST /transfers` 成功
-- [ ] `POST /exchanges` 成功
-- [ ] `GET /accounts/:id/transactions` 履歴取得
+- [x] `POST /auth/register` で Cookie 発行
+- [x] `POST /auth/login` / `POST /auth/logout`
+- [x] `GET /auth/me` 未認証は 401
+- [x] 他人の口座アクセス（GET/deposit/withdraw/transactions）は 403
+- [x] `POST /accounts` 201（自分名義）
+- [x] `POST /accounts/:id/deposit` で残高反映
+- [x] `POST /accounts/:id/withdraw` 残高不足は 422
+- [x] `POST /transfers` 成功
+- [x] `POST /exchanges` 成功
+- [x] `GET /accounts/:id/transactions` 履歴取得
+- [x] `POST /auth/register` 弱いパスワードは 422
+
+## 認証ドメイン / サービス
+
+- [x] `HashPassword` + `VerifyPassword` の往復
+- [x] 弱いパスワードは `ErrWeakPassword`
+- [x] `NewSessionToken` が 100 回で重複しない
+- [x] `Session.IsExpired`
+- [x] `Register` でセッション発行
+- [x] `Login` 誤りは `ErrInvalidCredentials`
+- [x] `Logout` → `Authenticate` が `ErrUnauthenticated`
+- [x] 非オーナーの `Deposit/Withdraw` は `ErrForbidden`

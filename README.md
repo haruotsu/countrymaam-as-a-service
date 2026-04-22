@@ -4,6 +4,7 @@
 
 - コンセプト・ドメイン仕様は [`CONCEPT.md`](./CONCEPT.md) を参照
 - テストリスト（TDD）は [`TEST_LIST.md`](./TEST_LIST.md) を参照
+- 本番へのデプロイ手順は [`DEPLOY.md`](./DEPLOY.md) を参照
 
 ## アーキテクチャ
 
@@ -39,44 +40,46 @@ docker compose down -v        # ボリュームごと削除（初期化したい
 
 ## エンドポイント
 
+認証は Cookie セッション (`cmaas_session`)。**🔒** は要ログイン。
+
 | メソッド | パス                              | 概要                     |
 | -------- | --------------------------------- | ------------------------ |
 | GET      | `/healthz`                        | ヘルスチェック           |
 | GET      | `/flavors`                        | フレーバー一覧           |
-| POST     | `/users/`                         | ユーザー登録             |
-| GET      | `/users/`                         | ユーザー一覧             |
-| GET      | `/users/{id}`                     | ユーザー取得             |
-| GET      | `/users/{id}/accounts`            | ユーザーの口座一覧       |
-| POST     | `/accounts/`                      | 口座開設                 |
-| GET      | `/accounts/{id}`                  | 口座取得                 |
-| POST     | `/accounts/{id}/deposit`          | 預け入れ                 |
-| POST     | `/accounts/{id}/withdraw`         | 引き出し                 |
-| GET      | `/accounts/{id}/transactions`     | 取引履歴                 |
-| POST     | `/transfers`                      | 送金（同フレーバー）     |
-| POST     | `/exchanges`                      | 両替（同ユーザー内）     |
+| POST     | `/auth/register`                  | ユーザー登録（+自動ログイン） |
+| POST     | `/auth/login`                     | ログイン                 |
+| POST     | `/auth/logout`                    | ログアウト               |
+| GET 🔒   | `/auth/me`                        | 自分のプロフィール       |
+| POST 🔒  | `/accounts`                       | 口座開設（自分名義）     |
+| GET 🔒   | `/accounts/me`                    | 自分の口座一覧           |
+| GET 🔒   | `/accounts/search?email=&flavor=` | メールで他ユーザーの口座を検索（送金用） |
+| GET 🔒   | `/accounts/{id}`                  | 口座取得（本人のみ）     |
+| POST 🔒  | `/accounts/{id}/deposit`          | 預け入れ（本人のみ）     |
+| POST 🔒  | `/accounts/{id}/withdraw`         | 引き出し（本人のみ）     |
+| GET 🔒   | `/accounts/{id}/transactions`     | 取引履歴（本人のみ）     |
+| POST 🔒  | `/transfers`                      | 送金（from は自分の口座） |
+| POST 🔒  | `/exchanges`                      | 両替（自分の2口座間）    |
 
-### 例: まっさらな状態から口座を作って両替する
+### 例: 登録して口座を作って両替する
 
 ```bash
-A=$(curl -sf -X POST http://localhost:8090/users/ \
-      -H 'Content-Type: application/json' \
-      -d '{"name":"Bob","email":"bob@example.com"}' | jq -r .id)
+# cookie jar を使ってセッションを維持する
+curl -sfc /tmp/jar -X POST http://localhost:8090/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Bob","email":"bob@example.com","password":"password-bob"}'
 
-AV=$(curl -sf -X POST http://localhost:8090/accounts/ \
-      -H 'Content-Type: application/json' \
-      -d "{\"user_id\":\"$A\",\"flavor\":\"vanilla\"}" | jq -r .id)
+AV=$(curl -sfb /tmp/jar -X POST http://localhost:8090/accounts \
+       -H 'Content-Type: application/json' -d '{"flavor":"vanilla"}' | jq -r .id)
 
-AC=$(curl -sf -X POST http://localhost:8090/accounts/ \
-      -H 'Content-Type: application/json' \
-      -d "{\"user_id\":\"$A\",\"flavor\":\"chocolate\"}" | jq -r .id)
+AC=$(curl -sfb /tmp/jar -X POST http://localhost:8090/accounts \
+       -H 'Content-Type: application/json' -d '{"flavor":"chocolate"}' | jq -r .id)
 
-curl -sf -X POST http://localhost:8090/accounts/$AV/deposit \
-      -H 'Content-Type: application/json' \
-      -d '{"amount":10,"memo":"はじめての一枚"}'
+curl -sfb /tmp/jar -X POST http://localhost:8090/accounts/$AV/deposit \
+  -H 'Content-Type: application/json' -d '{"amount":10,"memo":"はじめての一枚"}'
 
-curl -sf -X POST http://localhost:8090/exchanges \
-      -H 'Content-Type: application/json' \
-      -d "{\"from_account_id\":\"$AV\",\"to_account_id\":\"$AC\",\"amount\":10}"
+curl -sfb /tmp/jar -X POST http://localhost:8090/exchanges \
+  -H 'Content-Type: application/json' \
+  -d "{\"from_account_id\":\"$AV\",\"to_account_id\":\"$AC\",\"amount\":10}"
 # => {"from_amount":10,"to_amount":8}
 ```
 

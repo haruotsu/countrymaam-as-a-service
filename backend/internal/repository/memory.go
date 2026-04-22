@@ -18,6 +18,7 @@ func NewMemoryStore() Store {
 			users:        map[string]*domain.User{},
 			accounts:     map[string]*domain.Account{},
 			transactions: []*domain.Transaction{},
+			sessions:     map[string]*domain.Session{}, // key: token
 		},
 		nextID: &atomicCounter{},
 	}
@@ -28,6 +29,7 @@ type memData struct {
 	users        map[string]*domain.User
 	accounts     map[string]*domain.Account
 	transactions []*domain.Transaction
+	sessions     map[string]*domain.Session
 }
 
 type atomicCounter struct {
@@ -52,6 +54,7 @@ type memStore struct {
 func (s *memStore) Users() UserRepo               { return &memUserRepo{s: s} }
 func (s *memStore) Accounts() AccountRepo         { return &memAccountRepo{s: s} }
 func (s *memStore) Transactions() TransactionRepo { return &memTxRepo{s: s} }
+func (s *memStore) Sessions() SessionRepo         { return &memSessionRepo{s: s} }
 
 func (s *memStore) WithTx(ctx context.Context, fn func(ctx context.Context, tx Store) error) error {
 	if s.inTx {
@@ -65,6 +68,7 @@ func (s *memStore) WithTx(ctx context.Context, fn func(ctx context.Context, tx S
 		users:        map[string]*domain.User{},
 		accounts:     map[string]*domain.Account{},
 		transactions: make([]*domain.Transaction, 0, len(s.data.transactions)),
+		sessions:     map[string]*domain.Session{},
 	}
 	for k, v := range s.data.users {
 		cp := *v
@@ -78,6 +82,10 @@ func (s *memStore) WithTx(ctx context.Context, fn func(ctx context.Context, tx S
 		cp := *t
 		snapshot.transactions = append(snapshot.transactions, &cp)
 	}
+	for k, v := range s.data.sessions {
+		cp := *v
+		snapshot.sessions[k] = &cp
+	}
 
 	// tx スコープでは data を差し替え、ロック不要にする
 	scoped := &memStore{data: s.data, nextID: s.nextID, inTx: true}
@@ -86,6 +94,7 @@ func (s *memStore) WithTx(ctx context.Context, fn func(ctx context.Context, tx S
 		s.data.users = snapshot.users
 		s.data.accounts = snapshot.accounts
 		s.data.transactions = snapshot.transactions
+		s.data.sessions = snapshot.sessions
 		return err
 	}
 	return nil
@@ -97,6 +106,7 @@ type noLockStore struct{ inner *memStore }
 func (n *noLockStore) Users() UserRepo               { return &memUserRepo{s: n.inner, locked: true} }
 func (n *noLockStore) Accounts() AccountRepo         { return &memAccountRepo{s: n.inner, locked: true} }
 func (n *noLockStore) Transactions() TransactionRepo { return &memTxRepo{s: n.inner, locked: true} }
+func (n *noLockStore) Sessions() SessionRepo         { return &memSessionRepo{s: n.inner, locked: true} }
 func (n *noLockStore) WithTx(ctx context.Context, fn func(ctx context.Context, tx Store) error) error {
 	return fmt.Errorf("nested transaction is not supported")
 }
@@ -262,6 +272,46 @@ func (r *memTxRepo) Create(ctx context.Context, t *domain.Transaction) error {
 	r.s.data.transactions = append(r.s.data.transactions, &cp)
 	return nil
 }
+
+// --- sessions ---
+
+type memSessionRepo struct {
+	s      *memStore
+	locked bool
+}
+
+func (r *memSessionRepo) lock()   { if !r.locked { r.s.data.mu.Lock() } }
+func (r *memSessionRepo) unlock() { if !r.locked { r.s.data.mu.Unlock() } }
+
+func (r *memSessionRepo) Create(ctx context.Context, s *domain.Session) error {
+	r.lock()
+	defer r.unlock()
+	s.ID = r.s.nextID.next("s")
+	s.CreatedAt = time.Now()
+	cp := *s
+	r.s.data.sessions[s.Token] = &cp
+	return nil
+}
+
+func (r *memSessionRepo) FindActive(ctx context.Context, token string) (*domain.Session, error) {
+	r.lock()
+	defer r.unlock()
+	s, ok := r.s.data.sessions[token]
+	if !ok || s.IsExpired(time.Now()) {
+		return nil, domain.ErrSessionNotFound
+	}
+	cp := *s
+	return &cp, nil
+}
+
+func (r *memSessionRepo) DeleteByToken(ctx context.Context, token string) error {
+	r.lock()
+	defer r.unlock()
+	delete(r.s.data.sessions, token)
+	return nil
+}
+
+// ---
 
 func (r *memTxRepo) ListByAccount(ctx context.Context, accountID string, limit int) ([]*domain.Transaction, error) {
 	r.lock()

@@ -1,6 +1,12 @@
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -8,13 +14,14 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
       "Content-Type": "application/json",
       ...(init?.headers ?? {}),
     },
+    credentials: "include", // セッションCookieを送受信
     cache: "no-store",
   });
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) {
     const msg = data?.error ?? res.statusText;
-    throw new Error(`${res.status} ${msg}`);
+    throw new ApiError(res.status, msg);
   }
   return data as T;
 }
@@ -56,23 +63,42 @@ export type Transaction = {
   created_at: string;
 };
 
+export type AccountSearch = {
+  account: Account;
+  user_name: string;
+  user_email: string;
+};
+
 export const api = {
-  listFlavors: () => call<Flavor[]>("/flavors"),
-  listUsers: () => call<User[]>("/users/"),
-  createUser: (name: string, email: string) =>
-    call<User>("/users/", {
+  // auth
+  register: (name: string, email: string, password: string) =>
+    call<User>("/auth/register", {
       method: "POST",
-      body: JSON.stringify({ name, email }),
+      body: JSON.stringify({ name, email, password }),
     }),
-  getUser: (id: string) => call<User>(`/users/${id}`),
-  listUserAccounts: (userID: string) =>
-    call<Account[]>(`/users/${userID}/accounts`),
-  openAccount: (user_id: string, flavor: string) =>
-    call<Account>("/accounts/", {
+  login: (email: string, password: string) =>
+    call<User>("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ user_id, flavor }),
+      body: JSON.stringify({ email, password }),
+    }),
+  logout: () => call<{ status: string }>("/auth/logout", { method: "POST" }),
+  me: () => call<User>("/auth/me"),
+
+  // reference
+  listFlavors: () => call<Flavor[]>("/flavors"),
+
+  // accounts
+  listMyAccounts: () => call<Account[]>("/accounts/me"),
+  openAccount: (flavor: string) =>
+    call<Account>("/accounts", {
+      method: "POST",
+      body: JSON.stringify({ flavor }),
     }),
   getAccount: (id: string) => call<Account>(`/accounts/${id}`),
+  searchAccount: (email: string, flavor: string) =>
+    call<AccountSearch>(
+      `/accounts/search?email=${encodeURIComponent(email)}&flavor=${flavor}`,
+    ),
   deposit: (id: string, amount: number, memo: string) =>
     call<Account>(`/accounts/${id}/deposit`, {
       method: "POST",

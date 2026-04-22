@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AuthProvider } from "@/lib/auth";
+import { HeaderBar } from "./components/HeaderBar";
 
 export const metadata: Metadata = {
   title: "Countrymaam as a Service",
@@ -14,13 +16,10 @@ export default function RootLayout({
   return (
     <html lang="ja">
       <body>
-        <header className="site">
-          <h1>🍪 Countrymaam as a Service</h1>
-          <p>
-            カントリーマアムを資産として扱う、やや本気のパロディ銀行
-          </p>
-        </header>
-        <main>{children}</main>
+        <AuthProvider>
+          <HeaderBar />
+          <main>{children}</main>
+        </AuthProvider>
       </body>
     </html>
   );

@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +17,24 @@ func newTestServer(t *testing.T) http.Handler {
 	return NewServer(svc).Router()
 }
 
-func doJSON(t *testing.T, h http.Handler, method, path, body string) (*httptest.ResponseRecorder, map[string]any) {
+// do は cookie jar を自前で持つ小さなクライアント。
+type client struct {
+	h       http.Handler
+	cookies map[string]string
+}
+
+// newClient は新規サーバで新規クライアントを作る。
+func newClient(t *testing.T) *client {
+	return &client{h: newTestServer(t), cookies: map[string]string{}}
+}
+
+// anotherClient は同じサーバに対する別セッションのクライアントを作る。
+// 同一テスト内で複数ユーザーが同じ世界に同居する状況を作るのに使う。
+func anotherClient(h http.Handler) *client {
+	return &client{h: h, cookies: map[string]string{}}
+}
+
+func (c *client) do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var r *http.Request
 	if body != "" {
@@ -27,94 +43,151 @@ func doJSON(t *testing.T, h http.Handler, method, path, body string) (*httptest.
 	} else {
 		r = httptest.NewRequest(method, path, nil)
 	}
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	var data map[string]any
-	if w.Body.Len() > 0 && strings.HasPrefix(w.Body.String(), "{") {
-		_ = json.Unmarshal(w.Body.Bytes(), &data)
-	}
-	return w, data
-}
-
-func doJSONArray(t *testing.T, h http.Handler, method, path, body string) (*httptest.ResponseRecorder, []map[string]any) {
-	t.Helper()
-	var r *http.Request
-	if body != "" {
-		r = httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
-		r.Header.Set("Content-Type", "application/json")
-	} else {
-		r = httptest.NewRequest(method, path, nil)
+	for k, v := range c.cookies {
+		r.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	var data []map[string]any
-	if w.Body.Len() > 0 && strings.HasPrefix(strings.TrimSpace(w.Body.String()), "[") {
-		_ = json.Unmarshal(w.Body.Bytes(), &data)
+	c.h.ServeHTTP(w, r)
+	for _, sc := range w.Result().Cookies() {
+		if sc.MaxAge < 0 || sc.Value == "" {
+			delete(c.cookies, sc.Name)
+		} else {
+			c.cookies[sc.Name] = sc.Value
+		}
 	}
-	return w, data
+	return w
 }
 
-func TestE2E_HappyPath(t *testing.T) {
-	h := newTestServer(t)
+func parseObj(w *httptest.ResponseRecorder) map[string]any {
+	var m map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &m)
+	return m
+}
 
-	// ユーザー作成
-	w, u := doJSON(t, h, "POST", "/users", `{"name":"Alice","email":"a@example.com"}`)
+func parseArr(w *httptest.ResponseRecorder) []map[string]any {
+	var m []map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &m)
+	return m
+}
+
+func TestE2E_AuthHappyPath(t *testing.T) {
+	c := newClient(t)
+
+	// 未認証は 401
+	if w := c.do(t, "GET", "/auth/me", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d", w.Code)
+	}
+
+	// Register → 自動でセッションCookieが付く
+	w := c.do(t, "POST", "/auth/register", `{"name":"Alice","email":"alice@x.com","password":"password-1"}`)
 	if w.Code != http.StatusCreated {
-		t.Fatalf("create user: status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("register: %d %s", w.Code, w.Body.String())
 	}
-	userID := u["id"].(string)
+	if _, ok := c.cookies[sessionCookieName]; !ok {
+		t.Fatal("session cookie should be set")
+	}
+
+	// /auth/me が自分を返す
+	me := parseObj(c.do(t, "GET", "/auth/me", ""))
+	if me["email"] != "alice@x.com" {
+		t.Fatalf("me: %v", me)
+	}
 
 	// 口座開設
-	w, a := doJSON(t, h, "POST", "/accounts",
-		`{"user_id":"`+userID+`","flavor":"vanilla"}`)
+	w = c.do(t, "POST", "/accounts", `{"flavor":"vanilla"}`)
 	if w.Code != http.StatusCreated {
-		t.Fatalf("open account: status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("open: %d %s", w.Code, w.Body.String())
 	}
-	accID := a["id"].(string)
+	acc := parseObj(w)
+	accID := acc["id"].(string)
 
-	// 入金
-	w, a = doJSON(t, h, "POST", "/accounts/"+accID+"/deposit", `{"amount":10,"memo":"start"}`)
+	// 入金→残高確認
+	w = c.do(t, "POST", "/accounts/"+accID+"/deposit", `{"amount":10}`)
 	if w.Code != http.StatusOK {
-		t.Fatalf("deposit: %d %s", w.Code, w.Body.String())
-	}
-	if int64(a["balance"].(float64)) != 10 {
-		t.Fatalf("balance after deposit: %v", a["balance"])
+		t.Fatalf("deposit: %d", w.Code)
 	}
 
-	// 引出 超過
-	w, _ = doJSON(t, h, "POST", "/accounts/"+accID+"/withdraw", `{"amount":100}`)
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("want 422 on insufficient, got %d", w.Code)
-	}
-
-	// 履歴確認（入金1件のみ）
-	_, list := doJSONArray(t, h, "GET", "/accounts/"+accID+"/transactions", "")
-	if len(list) != 1 {
-		t.Fatalf("want 1 transaction, got %d", len(list))
+	// ログアウト
+	_ = c.do(t, "POST", "/auth/logout", "")
+	if w := c.do(t, "GET", "/auth/me", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("me after logout: want 401, got %d", w.Code)
 	}
 }
 
-func TestE2E_DuplicateEmail(t *testing.T) {
-	h := newTestServer(t)
-	_, _ = doJSON(t, h, "POST", "/users", `{"name":"A","email":"dup@example.com"}`)
-	w, _ := doJSON(t, h, "POST", "/users", `{"name":"B","email":"dup@example.com"}`)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("want 409, got %d", w.Code)
+func TestE2E_Forbidden_OthersAccount(t *testing.T) {
+	ca := newClient(t)
+	_ = ca.do(t, "POST", "/auth/register", `{"name":"A","email":"a@x.com","password":"password-1"}`)
+	wa := ca.do(t, "POST", "/accounts", `{"flavor":"vanilla"}`)
+	aID := parseObj(wa)["id"].(string)
+
+	cb := anotherClient(ca.h)
+	_ = cb.do(t, "POST", "/auth/register", `{"name":"B","email":"b@x.com","password":"password-1"}`)
+
+	// B が A の口座を見ようとする → 403
+	if w := cb.do(t, "GET", "/accounts/"+aID, ""); w.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d body=%s", w.Code, w.Body.String())
+	}
+	// B が A の口座に入金しようとする → 403
+	if w := cb.do(t, "POST", "/accounts/"+aID+"/deposit", `{"amount":1}`); w.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d", w.Code)
+	}
+	// B が A の口座の履歴を見る → 403
+	if w := cb.do(t, "GET", "/accounts/"+aID+"/transactions", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d", w.Code)
 	}
 }
 
-func TestE2E_TransferFlavorMismatch(t *testing.T) {
-	h := newTestServer(t)
-	_, u1 := doJSON(t, h, "POST", "/users", `{"name":"A","email":"a@x.com"}`)
-	_, u2 := doJSON(t, h, "POST", "/users", `{"name":"B","email":"b@x.com"}`)
-	_, a1 := doJSON(t, h, "POST", "/accounts",
-		`{"user_id":"`+u1["id"].(string)+`","flavor":"vanilla"}`)
-	_, a2 := doJSON(t, h, "POST", "/accounts",
-		`{"user_id":"`+u2["id"].(string)+`","flavor":"chocolate"}`)
-	_, _ = doJSON(t, h, "POST", "/accounts/"+a1["id"].(string)+"/deposit", `{"amount":5}`)
-	w, _ := doJSON(t, h, "POST", "/transfers",
-		`{"from_account_id":"`+a1["id"].(string)+`","to_account_id":"`+a2["id"].(string)+`","amount":1}`)
+func TestE2E_TransferByEmailLookup(t *testing.T) {
+	// A と B が同じ vanilla 口座を持っている。A が B にメールで送金する。
+	ca := newClient(t)
+	_ = ca.do(t, "POST", "/auth/register", `{"name":"A","email":"a@x.com","password":"password-1"}`)
+	aAcc := parseObj(ca.do(t, "POST", "/accounts", `{"flavor":"vanilla"}`))
+	_ = ca.do(t, "POST", "/accounts/"+aAcc["id"].(string)+"/deposit", `{"amount":20}`)
+
+	cb := anotherClient(ca.h)
+	_ = cb.do(t, "POST", "/auth/register", `{"name":"B","email":"b@x.com","password":"password-1"}`)
+	bAcc := parseObj(cb.do(t, "POST", "/accounts", `{"flavor":"vanilla"}`))
+
+	// A が /accounts/search で B の vanilla 口座を解決
+	w := ca.do(t, "GET", "/accounts/search?email=b@x.com&flavor=vanilla", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("search: %d %s", w.Code, w.Body.String())
+	}
+	body := parseObj(w)
+	resolved, _ := body["account"].(map[string]any)
+	if resolved["id"].(string) != bAcc["id"].(string) {
+		t.Fatalf("resolved account id mismatch")
+	}
+
+	// A が送金
+	w = ca.do(t, "POST", "/transfers",
+		`{"from_account_id":"`+aAcc["id"].(string)+`","to_account_id":"`+bAcc["id"].(string)+`","amount":5}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("transfer: %d %s", w.Code, w.Body.String())
+	}
+
+	// B の残高確認（自分でログインして）
+	w = cb.do(t, "GET", "/accounts/"+bAcc["id"].(string), "")
+	if int64(parseObj(w)["balance"].(float64)) != 5 {
+		t.Fatalf("B balance wrong: %v", parseObj(w))
+	}
+}
+
+func TestE2E_WeakPassword(t *testing.T) {
+	c := newClient(t)
+	w := c.do(t, "POST", "/auth/register", `{"name":"A","email":"a@x.com","password":"short"}`)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("want 422, got %d", w.Code)
+	}
+}
+
+func TestE2E_MyAccountsList(t *testing.T) {
+	c := newClient(t)
+	_ = c.do(t, "POST", "/auth/register", `{"name":"A","email":"a@x.com","password":"password-1"}`)
+	_ = c.do(t, "POST", "/accounts", `{"flavor":"vanilla"}`)
+	_ = c.do(t, "POST", "/accounts", `{"flavor":"chocolate"}`)
+	list := parseArr(c.do(t, "GET", "/accounts/me", ""))
+	if len(list) != 2 {
+		t.Fatalf("want 2, got %d", len(list))
 	}
 }

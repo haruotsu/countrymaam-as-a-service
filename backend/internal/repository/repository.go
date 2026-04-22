@@ -12,6 +12,7 @@ type Store interface {
 	Users() UserRepo
 	Accounts() AccountRepo
 	Transactions() TransactionRepo
+	Sessions() SessionRepo
 
 	// WithTx は fn をトランザクション内で実行する。fn がエラーを返せばロールバック。
 	// fn に渡される Store はそのトランザクションにバインドされている。
@@ -39,4 +40,11 @@ type AccountRepo interface {
 type TransactionRepo interface {
 	Create(ctx context.Context, t *domain.Transaction) error
 	ListByAccount(ctx context.Context, accountID string, limit int) ([]*domain.Transaction, error)
+}
+
+type SessionRepo interface {
+	Create(ctx context.Context, s *domain.Session) error
+	// FindActive はトークンで有効期限内のセッションを探す。期限切れは ErrSessionNotFound。
+	FindActive(ctx context.Context, token string) (*domain.Session, error)
+	DeleteByToken(ctx context.Context, token string) error
 }

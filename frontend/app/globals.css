@@ -43,18 +43,40 @@ main {
 header.site {
   background: radial-gradient(circle at 30% 30%, #e8b670 0%, #c88a4a 60%, #8b5a2b 100%);
   color: #fff8e8;
-  padding: 1.2rem 1.5rem;
+  padding: 1rem 1.5rem;
   border-bottom: 4px solid var(--choco-chip);
 }
-header.site h1 {
-  margin: 0;
-  font-size: 1.5rem;
-  letter-spacing: 0.04em;
+header.site .site-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 960px;
+  margin: 0 auto;
+  gap: 1rem;
+  flex-wrap: wrap;
 }
-header.site p {
-  margin: 0.3rem 0 0;
+header.site .brand {
+  color: #fff8e8;
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+}
+header.site .tagline {
+  margin: 0.2rem 0 0;
+  font-size: 0.8rem;
+  opacity: 0.85;
+}
+header.site .site-user {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
   font-size: 0.85rem;
-  opacity: 0.9;
+}
+header.site .site-user .muted {
+  color: #ffe7c1;
+  opacity: 0.75;
+  font-size: 0.75rem;
 }
 
 h2 {
@@ -73,11 +95,22 @@ h2 {
   box-shadow: 0 2px 0 rgba(139, 90, 43, 0.12);
 }
 
+.auth-card {
+  max-width: 420px;
+  margin: 2rem auto;
+}
+
 .row {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
   align-items: center;
+}
+
+.row-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 }
 
 label {
@@ -119,6 +152,13 @@ button.ghost {
   background: transparent;
   color: var(--biscuit-dark);
   border: 1px solid var(--biscuit);
+}
+button.ghost.light {
+  color: #fff8e8;
+  border-color: rgba(255, 248, 232, 0.6);
+}
+button.ghost.light:hover {
+  background: rgba(255, 248, 232, 0.15);
 }
 button.danger {
   background: var(--danger);
@@ -194,5 +234,15 @@ th {
 
 .muted {
   color: #8b7357;
+  font-size: 0.85rem;
+}
+
+.ok-msg {
+  color: var(--ok);
+  background: #ecf4ea;
+  border: 1px solid #c8dcc1;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
   font-size: 0.85rem;
 }

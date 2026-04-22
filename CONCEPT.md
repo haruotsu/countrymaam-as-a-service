@@ -69,6 +69,7 @@ amount_to = floor(amount_from × rate_from ÷ rate_to)
 - 送金は **同一フレーバー間のみ**。違うフレーバーに送りたいときは両替を使う
 - 送金・両替は **原子的** — 片側が失敗したら両口座とも変更されない
 - 同一口座への自己送金は禁止
+- **所有権**: 入出金 / 両替 / 履歴参照は本人のみ。送金は「自分の口座から」なら任意の宛先に可
 
 ---
 
@@ -77,12 +78,21 @@ amount_to = floor(amount_from × rate_from ÷ rate_to)
 - **利息** — 銀行っぽさの定番だが、今回のパロディでは不要とユーザーが判断
 - 風化／賞味期限ロジック
 - 為替レートの変動（固定）
-- マルチテナント / 認可 / 認証（ユーザー ID をそのまま信じる）
 - 監査ログの耐改竄性
+- レート制限・二要素認証
 
 これらは将来拡張の余地として残すが、v1 ではシンプルに保つ。
 
 ---
+
+## 認証
+
+- Email + パスワード（bcrypt, `minPasswordLen = 8`）
+- セッションは DB 保管 (`sessions` テーブル)、トークンは 32byte の crypto/rand を base64url
+- クッキー: `cmaas_session`、HttpOnly / SameSite=Lax / 本番は Secure
+- セッション有効期限は 7 日（`domain.SessionTTL`）
+
+認証エンドポイントは `/auth/register` `/auth/login` `/auth/logout` `/auth/me`。以降の保護リソースは Cookie のセッションをミドルウェアで検証。
 
 ## ディレクトリ構成
 
