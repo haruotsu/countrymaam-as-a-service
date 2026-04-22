@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cmaas
+      POSTGRES_PASSWORD: cmaas
+      POSTGRES_DB: cmaas
+    ports:
+      - "5432:5432"
+    volumes:
+      - cmaas-db:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cmaas -d cmaas"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    working_dir: /src
+    volumes:
+      - ./backend:/src
+      - go-mod-cache:/go/pkg/mod
+    environment:
+      DATABASE_URL: postgres://cmaas:cmaas@db:5432/cmaas?sslmode=disable
+      PORT: "8080"
+    ports:
+      - "8090:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:8090
+    ports:
+      - "3900:3000"
+    depends_on:
+      - backend
+
+volumes:
+  cmaas-db:
+  go-mod-cache:
+  frontend-node-modules:

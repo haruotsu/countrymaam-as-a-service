@@ -1,0 +1,8 @@
+# 開発用: ホストのコードをマウントして go run で起動。go test も同じイメージで。
+FROM golang:1.25-alpine
+WORKDIR /src
+RUN apk add --no-cache git
+COPY go.mod go.sum* ./
+RUN go mod download || true
+EXPOSE 8080
+CMD ["go", "run", "./cmd/server"]

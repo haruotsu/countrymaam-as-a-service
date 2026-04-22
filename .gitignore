@@ -1,0 +1,15 @@
+/backend/server
+/backend/tmp/
+
+# Node
+/frontend/node_modules
+/frontend/.next
+/frontend/out
+/frontend/.env.local
+
+# OS
+.DS_Store
+
+# Dev artifacts
+/.playwright-mcp/
+/cmaas-*.png
