@@ -100,10 +100,6 @@ TEST_DATABASE_URL=postgres://cmaas:cmaas@localhost:5432/cmaas?sslmode=disable \
   go test ./internal/repository/ -v
 ```
 
-## 開発スタイル
-
-t_wada スタイル TDD（Red → Green → Refactor）。コミット前に必ず `go test ./...` を実行する。
-
 ## 免責
 
 不二家および「カントリーマアム®」は株式会社不二家の登録商標・商品名です。本プロジェクトは**非公式のパロディ作品**であり、不二家とは一切関係がありません。
